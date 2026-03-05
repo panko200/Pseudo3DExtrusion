@@ -38,16 +38,29 @@ namespace Pseudo3DExtrusion
         [AnimationSlider("F1", "", 1, 255)]
         public Animation AlphaThreshold { get; } = new Animation(10f, 1f, 255f); [Display(GroupName = "立体化", Name = "押し出し量 (厚み)")]
         [AnimationSlider("F1", "px", 0, 1000)]
-        public Animation Depth { get; } = new Animation(50f, 0, 1000f); [Display(GroupName = "背面変形", Name = "Xズレ", Description = "背面を横方向にずらして、斜めの立体を作ります。")]
+        public Animation Depth { get; } = new Animation(50f, 0, 1000f);
+
+        [Display(GroupName = "背面変形", Name = "Xズレ", Description = "背面を横方向にずらして、斜めの立体を作ります。")]
         [AnimationSlider("F1", "px", -200, 200)]
         public Animation BackOffsetX { get; } = new Animation(0f, -1000f, 1000f); [Display(GroupName = "背面変形", Name = "Yズレ", Description = "背面を縦方向にずらして、斜めの立体を作ります。")]
         [AnimationSlider("F1", "px", -200, 200)]
         public Animation BackOffsetY { get; } = new Animation(0f, -1000f, 1000f); [Display(GroupName = "背面変形", Name = "拡大率", Description = "背面の大きさを変更して、パース（遠近感）を強調します。")]
         [AnimationSlider("F1", "%", 0, 200)]
-        public Animation BackScale { get; } = new Animation(100f, 0f, 500f); [Display(GroupName = "立体化", Name = "ベースカラー", Description = "立体の基本となる色です。(テクスチャOFFの時は全体の色になります)")]
+        public Animation BackScale { get; } = new Animation(100f, 0f, 500f); [Display(GroupName = "背面変形", Name = "X回転", Description = "背面をX軸で回転させます。")]
+        [AnimationSlider("F1", "°", -180, 180)]
+        public Animation BackRotationX { get; } = new Animation(0f, -3600f, 3600f); [Display(GroupName = "背面変形", Name = "Y回転", Description = "背面をY軸で回転させます。")]
+        [AnimationSlider("F1", "°", -180, 180)]
+        public Animation BackRotationY { get; } = new Animation(0f, -3600f, 3600f); [Display(GroupName = "背面変形", Name = "Z回転", Description = "背面をZ軸でねじります。")]
+        [AnimationSlider("F1", "°", -180, 180)]
+        public Animation BackRotationZ { get; } = new Animation(0f, -3600f, 3600f);
+        [Display(GroupName = "立体化", Name = "ベースカラー", Description = "立体の基本となる色です。")]
         [ColorPicker]
         public System.Windows.Media.Color BaseColor { get => _baseColor; set => Set(ref _baseColor, value); }
-        private System.Windows.Media.Color _baseColor = System.Windows.Media.Colors.White; [Display(GroupName = "描画設定", Name = "簡易ライティング", Description = "光を当てて立体感を強調します。")]
+        private System.Windows.Media.Color _baseColor = System.Windows.Media.Colors.White; [Display(GroupName = "描画設定", Name = "背面カリング", Description = "裏側を向いている面を非表示にします。背面変形を使って面が不自然に消える場合はOFFにしてください。")]
+        [ToggleSlider]
+        public bool EnableCulling { get => _enableCulling; set => Set(ref _enableCulling, value); }
+        private bool _enableCulling = true; // ★追加：カリング解除スイッチ！
+        [Display(GroupName = "描画設定", Name = "簡易ライティング", Description = "光を当てて立体感を強調します。")]
         [ToggleSlider]
         public bool EnableLighting { get => _enableLighting; set => Set(ref _enableLighting, value); }
         private bool _enableLighting = true; [Display(GroupName = "表示面", Name = "前面")]
@@ -63,7 +76,7 @@ namespace Pseudo3DExtrusion
 
         public override IEnumerable<string> CreateExoVideoFilters(int keyFrameIndex, ExoOutputDescription exoOutputDescription) => [];
         public override IVideoEffectProcessor CreateVideoEffect(IGraphicsDevicesAndContext devices) => new ShapeExtrudeProcessor(devices, this);
-        protected override IEnumerable<YukkuriMovieMaker.Commons.IAnimatable> GetAnimatables() => [AlphaThreshold, Depth, BackOffsetX, BackOffsetY, BackScale];
+        protected override IEnumerable<YukkuriMovieMaker.Commons.IAnimatable> GetAnimatables() => [AlphaThreshold, Depth, BackOffsetX, BackOffsetY, BackScale, BackRotationX, BackRotationY, BackRotationZ];
     }
 
     internal class ShapeExtrudeProcessor : IVideoEffectProcessor
@@ -103,6 +116,15 @@ namespace Pseudo3DExtrusion
             float backOffsetY = (float)_item.BackOffsetY.GetValue(frame, desc.ItemDuration.Frame, desc.FPS);
             float backScale = (float)_item.BackScale.GetValue(frame, desc.ItemDuration.Frame, desc.FPS) / 100f;
 
+            float d2r = (float)Math.PI / 180.0f;
+            float backRotX = (float)_item.BackRotationX.GetValue(frame, desc.ItemDuration.Frame, desc.FPS) * d2r;
+            float backRotY = (float)_item.BackRotationY.GetValue(frame, desc.ItemDuration.Frame, desc.FPS) * d2r;
+            float backRotZ = (float)_item.BackRotationZ.GetValue(frame, desc.ItemDuration.Frame, desc.FPS) * d2r;
+
+            Matrix4x4 backRotationMatrix = Matrix4x4.CreateRotationZ(backRotZ) *
+                                           Matrix4x4.CreateRotationY(-backRotY) *
+                                           Matrix4x4.CreateRotationX(-backRotX);
+
             Vortice.RawRectF rawBounds;
             try { rawBounds = dc.GetImageLocalBounds(_input); } catch { return desc.DrawDescription; }
             int width = (int)Math.Ceiling(rawBounds.Right) - (int)Math.Floor(rawBounds.Left);
@@ -115,7 +137,7 @@ namespace Pseudo3DExtrusion
                 _cpuReadBitmap?.Dispose();
                 _cpuReadBitmap = dc.CreateBitmap(new SizeI(width, height), IntPtr.Zero, 0, new BitmapProperties1(new PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied), 96, 96, BitmapOptions.CpuRead | BitmapOptions.CannotDraw));
             }
-            // ★ここから修正：Deviceもちゃんと using で受け取る！
+
             using (var d2dDevice = _devices.DeviceContext.Device)
             using (var localContext = d2dDevice.CreateDeviceContext(DeviceContextOptions.None))
             using (var gpuBitmap = localContext.CreateBitmap(new SizeI(width, height), new BitmapProperties1(new PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied), 96, 96, BitmapOptions.Target)))
@@ -129,8 +151,6 @@ namespace Pseudo3DExtrusion
             }
 
             var drawDesc = desc.DrawDescription;
-            float d2r = (float)Math.PI / 180.0f;
-
             Matrix4x4 localRotation = Matrix4x4.CreateRotationZ(drawDesc.Rotation.Z * d2r) *
                                        Matrix4x4.CreateRotationY(-drawDesc.Rotation.Y * d2r) *
                                        Matrix4x4.CreateRotationX(-drawDesc.Rotation.X * d2r);
@@ -155,7 +175,10 @@ namespace Pseudo3DExtrusion
 
             var map = _cpuReadBitmap.Map(MapOptions.Read);
             List<RenderableFace> faces;
-            try { faces = ExtractAndBuildPolygons(map, width, height, threshold, depth, rawBounds, backOffsetX, backOffsetY, backScale, m_internalDraw); }
+            try
+            {
+                faces = ExtractAndBuildPolygons(map, width, height, threshold, depth, rawBounds, backOffsetX, backOffsetY, backScale, backRotationMatrix, m_internalDraw);
+            }
             finally { _cpuReadBitmap.Unmap(); }
 
             var validFaces = new List<RenderableFace>();
@@ -165,9 +188,14 @@ namespace Pseudo3DExtrusion
                 Vector3 worldFaceCenter = Vector3.Transform(face.Center, localRotation * worldTranslation);
 
                 Vector3 viewDir = worldEye - worldFaceCenter;
+                float dot = Vector3.Dot(rotatedNormal, viewDir);
 
-                if (Vector3.Dot(rotatedNormal, viewDir) > 0)
+                // ★修正：カリングがOFFの時は全描画。ONの時は見えてる面だけ。
+                if (!_item.EnableCulling || dot > 0)
                 {
+                    // カリングOFFで裏面が見えている時、法線を反転させてライティングを綺麗にする
+                    if (dot < 0) rotatedNormal = -rotatedNormal;
+
                     face.DistanceSq = viewDir.LengthSquared();
                     face.CalculateColorAndBrightness(_item.BaseColor, rotatedNormal, _item.EnableLighting);
                     validFaces.Add(face);
@@ -207,8 +235,6 @@ namespace Pseudo3DExtrusion
 
             using var paint = new SKPaint { IsAntialias = true };
             foreach (var face in validFaces) face.Draw(canvas, m_internalDraw, paint);
-
-            // ★テクスチャとして保持したリソースを解放
             foreach (var face in validFaces) face.Dispose();
 
             _outD2DBitmap?.Dispose();
@@ -229,22 +255,18 @@ namespace Pseudo3DExtrusion
             };
         }
 
-        private unsafe List<RenderableFace> ExtractAndBuildPolygons(MappedRectangle map, int width, int height, int threshold, float depth, Vortice.RawRectF rawBounds, float backOffsetX, float backOffsetY, float backScale, Matrix4x4 projectionMatrix)
+        private unsafe List<RenderableFace> ExtractAndBuildPolygons(MappedRectangle map, int width, int height, int threshold, float depth, Vortice.RawRectF rawBounds, float backOffsetX, float backOffsetY, float backScale, Matrix4x4 backRotationMatrix, Matrix4x4 projectionMatrix)
         {
             using var bwBitmap = new SKBitmap(width, height, SKColorType.Gray8, SKAlphaType.Opaque);
-
-            // ★テクスチャ用のフルカラー画像を作成
             SKBitmap? textureBitmap = null;
             if (_item.UseTexture) textureBitmap = new SKBitmap(width, height, SKColorType.Bgra8888, SKAlphaType.Premul);
 
-            byte* srcPtr = (byte*)map.Bits;
-            byte* dstPtr = (byte*)bwBitmap.GetPixels();
+            byte* srcPtr = (byte*)map.Bits; byte* dstPtr = (byte*)bwBitmap.GetPixels();
             byte* texPtr = textureBitmap != null ? (byte*)textureBitmap.GetPixels() : null;
 
             for (int y = 0; y < height; y++)
             {
-                byte* srcRow = srcPtr + y * map.Pitch;
-                byte* dstRow = dstPtr + y * bwBitmap.RowBytes;
+                byte* srcRow = srcPtr + y * map.Pitch; byte* dstRow = dstPtr + y * bwBitmap.RowBytes;
                 byte* texRow = texPtr != null ? texPtr + y * textureBitmap!.RowBytes : null;
 
                 for (int x = 0; x < width; x++)
@@ -276,6 +298,17 @@ namespace Pseudo3DExtrusion
             float imgCenterX = rawLeft + width / 2.0f;
             float imgCenterY = rawTop + height / 2.0f;
 
+            Matrix4x4 frontTransform = Matrix4x4.CreateTranslation(0, 0, depth / 2.0f);
+            Matrix4x4 backTransform = Matrix4x4.CreateTranslation(-imgCenterX, -imgCenterY, 0) *
+                                      Matrix4x4.CreateScale(backScale) *
+                                      backRotationMatrix *
+                                      Matrix4x4.CreateTranslation(imgCenterX + backOffsetX, imgCenterY + backOffsetY, -depth / 2.0f);
+
+            Matrix4x4 frontCombined = frontTransform * projectionMatrix;
+            Matrix4x4 backCombined = backTransform * projectionMatrix;
+            SKMatrix texFront = GetTextureMatrix(frontCombined, rawLeft, rawTop);
+            SKMatrix texBack = GetTextureMatrix(backCombined, rawLeft, rawTop);
+
             foreach (var path in paths)
             {
                 var subFrontPaths = new List<List<Vector3>>();
@@ -297,16 +330,11 @@ namespace Pseudo3DExtrusion
 
                     foreach (var p in subPts)
                     {
-                        float cx = p.X + rawLeft;
-                        float cy = p.Y + rawTop;
+                        Vector3 basePos = new Vector3(p.X + rawLeft, p.Y + rawTop, 0);
+                        front.Add(Vector3.Transform(basePos, frontTransform));
+                        back.Add(Vector3.Transform(basePos, backTransform));
 
-                        float bx = (cx - imgCenterX) * backScale + imgCenterX + backOffsetX;
-                        float by = (cy - imgCenterY) * backScale + imgCenterY + backOffsetY;
-
-                        front.Add(new Vector3(cx, cy, depth / 2.0f));
-                        back.Add(new Vector3(bx, by, -depth / 2.0f));
-
-                        sumX += cx; sumY += cy; totalPoints++;
+                        sumX += basePos.X; sumY += basePos.Y; totalPoints++;
                     }
                     subFrontPaths.Add(front);
                     subBackPaths.Add(back);
@@ -317,16 +345,13 @@ namespace Pseudo3DExtrusion
                         {
                             var pt1 = subPts[i]; var pt2 = subPts[(i + 1) % subPts.Count];
 
-                            Vector3 p1f = new Vector3(pt1.X + rawLeft, pt1.Y + rawTop, depth / 2.0f);
-                            Vector3 p2f = new Vector3(pt2.X + rawLeft, pt2.Y + rawTop, depth / 2.0f);
+                            Vector3 p1Base = new Vector3(pt1.X + rawLeft, pt1.Y + rawTop, 0);
+                            Vector3 p2Base = new Vector3(pt2.X + rawLeft, pt2.Y + rawTop, 0);
 
-                            float bx1 = (p1f.X - imgCenterX) * backScale + imgCenterX + backOffsetX;
-                            float by1 = (p1f.Y - imgCenterY) * backScale + imgCenterY + backOffsetY;
-                            Vector3 p1b = new Vector3(bx1, by1, -depth / 2.0f);
-
-                            float bx2 = (p2f.X - imgCenterX) * backScale + imgCenterX + backOffsetX;
-                            float by2 = (p2f.Y - imgCenterY) * backScale + imgCenterY + backOffsetY;
-                            Vector3 p2b = new Vector3(bx2, by2, -depth / 2.0f);
+                            Vector3 p1f = Vector3.Transform(p1Base, frontTransform);
+                            Vector3 p2f = Vector3.Transform(p2Base, frontTransform);
+                            Vector3 p1b = Vector3.Transform(p1Base, backTransform);
+                            Vector3 p2b = Vector3.Transform(p2Base, backTransform);
 
                             if (p1f == p2f) continue;
 
@@ -357,29 +382,17 @@ namespace Pseudo3DExtrusion
 
                 if (totalPoints > 0)
                 {
-                    float centerX = sumX / totalPoints;
-                    float centerY = sumY / totalPoints;
-                    float backCenterX = (centerX - imgCenterX) * backScale + imgCenterX + backOffsetX;
-                    float backCenterY = (centerY - imgCenterY) * backScale + imgCenterY + backOffsetY;
+                    Vector3 baseCenter = new Vector3(sumX / totalPoints, sumY / totalPoints, 0);
+                    Vector3 frontCenter = Vector3.Transform(baseCenter, frontTransform);
+                    Vector3 backCenter = Vector3.Transform(baseCenter, backTransform);
+
+                    Vector3 frontNormal = new Vector3(0, 0, 1);
+                    Vector3 backNormal = Vector3.Normalize(Vector3.TransformNormal(new Vector3(0, 0, -1), backRotationMatrix));
 
                     if (_item.ShowFront && subFrontPaths.Count > 0)
-                        faces.Add(new ComplexFace
-                        {
-                            SubPaths = subFrontPaths,
-                            Center = new Vector3(centerX, centerY, depth / 2.0f),
-                            Normal = new Vector3(0, 0, 1),
-                            Texture = textureBitmap?.Copy(),
-                            TexMatrix = GetTextureMatrix(projectionMatrix, 1.0f, rawLeft, rawTop, depth / 2.0f)
-                        });
+                        faces.Add(new ComplexFace { SubPaths = subFrontPaths, Center = frontCenter, Normal = frontNormal, Texture = textureBitmap?.Copy(), TexMatrix = texFront });
                     if (_item.ShowBack && subBackPaths.Count > 0)
-                        faces.Add(new ComplexFace
-                        {
-                            SubPaths = subBackPaths,
-                            Center = new Vector3(backCenterX, backCenterY, -depth / 2.0f),
-                            Normal = new Vector3(0, 0, -1),
-                            Texture = textureBitmap?.Copy(),
-                            TexMatrix = GetTextureMatrix(projectionMatrix, backScale, rawLeft * backScale - imgCenterX * backScale + imgCenterX + backOffsetX, rawTop * backScale - imgCenterY * backScale + imgCenterY + backOffsetY, -depth / 2.0f)
-                        });
+                        faces.Add(new ComplexFace { SubPaths = subBackPaths, Center = backCenter, Normal = backNormal, Texture = textureBitmap?.Copy(), TexMatrix = texBack });
                 }
             }
 
@@ -387,20 +400,20 @@ namespace Pseudo3DExtrusion
             return faces;
         }
 
-        // ★3D行列から2Dのテクスチャ投影行列(パースペクティブ対応)を生成！
-        private SKMatrix GetTextureMatrix(Matrix4x4 m, float S, float Tx, float Ty, float Z0)
+        private SKMatrix GetTextureMatrix(Matrix4x4 combined, float rawLeft, float rawTop)
         {
+            Matrix4x4 texToScreen = Matrix4x4.CreateTranslation(rawLeft, rawTop, 0) * combined;
             return new SKMatrix
             {
-                ScaleX = S * m.M11,
-                SkewX = S * m.M21,
-                TransX = Tx * m.M11 + Ty * m.M21 + Z0 * m.M31 + m.M41,
-                SkewY = S * m.M12,
-                ScaleY = S * m.M22,
-                TransY = Tx * m.M12 + Ty * m.M22 + Z0 * m.M32 + m.M42,
-                Persp0 = S * m.M14,
-                Persp1 = S * m.M24,
-                Persp2 = Tx * m.M14 + Ty * m.M24 + Z0 * m.M34 + m.M44
+                ScaleX = texToScreen.M11,
+                SkewX = texToScreen.M21,
+                TransX = texToScreen.M41,
+                SkewY = texToScreen.M12,
+                ScaleY = texToScreen.M22,
+                TransY = texToScreen.M42,
+                Persp0 = texToScreen.M14,
+                Persp1 = texToScreen.M24,
+                Persp2 = texToScreen.M44
             };
         }
 
@@ -488,7 +501,6 @@ namespace Pseudo3DExtrusion
         {
             if (Texture != null)
             {
-                // ★パースに合わせてテクスチャを完璧にマッピング！
                 paint.Shader = SKShader.CreateBitmap(Texture, SKShaderTileMode.Clamp, SKShaderTileMode.Clamp, TexMatrix);
                 paint.ColorFilter = SKColorFilter.CreateBlendMode(
                     new SKColor((byte)(255 * Brightness), (byte)(255 * Brightness), (byte)(255 * Brightness)),

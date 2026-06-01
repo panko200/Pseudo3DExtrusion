@@ -19,18 +19,61 @@ using YukkuriMovieMaker.Exo;
 using YukkuriMovieMaker.Player.Video;
 using YukkuriMovieMaker.Plugin.Effects;
 using static System.Windows.Forms.DataFormats;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
 
 namespace Pseudo3DExtrusion
 {
     public enum TraceTarget { Alpha, Luminance, LuminanceInvert }
-    [VideoEffect("疑似3D押し出し", ["加工"], ["Extrude","Extrusion"])]
+    [VideoEffect("疑似3D押し出し", ["加工"], ["Extrude", "Extrusion"])]
     internal class ShapeExtrudeEffect : VideoEffectBase
     {
-        public override string Label => "疑似3D押し出し"; 
+        static ShapeExtrudeEffect()
+        {
+            LoadNativeLibrary();
+        }
+
+        private static void LoadNativeLibrary()
+        {
+            try
+            {
+                var pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                if (string.IsNullOrEmpty(pluginDir)) return;
+
+                // 実行環境のアーキテクチャを取得 (x64 / x86 / ARM64)
+                string arch = RuntimeInformation.ProcessArchitecture switch
+                {
+                    Architecture.X64 => "win-x64",
+                    Architecture.X86 => "win-x86",
+                    Architecture.Arm64 => "win-arm64",
+                    _ => "win-x64"
+                };
+
+                // runtimesフォルダから正しいアーキテクチャのDLLパスを指定
+                string dllPath = Path.Combine(pluginDir, "runtimes", arch, "native", "libSkiaSharp.dll");
+
+                if (File.Exists(dllPath))
+                {
+                    NativeLibrary.Load(dllPath);
+                }
+                else
+                {
+                    // 以前のバージョンのように直下にある場合のフォールバック
+                    string directPath = Path.Combine(pluginDir, "libSkiaSharp.dll");
+                    if (File.Exists(directPath)) NativeLibrary.Load(directPath);
+                }
+            }
+            catch
+            {
+                // ロードに失敗した場合は無視してSkiaSharp標準の機構に任せる
+            }
+        }
+        public override string Label => "疑似3D押し出し";
         [Display(GroupName = "テクスチャ", Name = "テクスチャを使用する", Description = "チェックを入れると、前面と背面に元の画像（色や模様）を貼り付けます！側面はベースカラーで塗られます。")]
         [ToggleSlider]
         public bool UseTexture { get => _useTexture; set => Set(ref _useTexture, value); }
-        private bool _useTexture = true; // ★デフォルトONにしました！
+        private bool _useTexture = true;
         [Display(GroupName = "解析設定", Name = "抽出モード")]
         [EnumComboBox]
         public TraceTarget TraceTarget { get => _traceTarget; set => Set(ref _traceTarget, value); }
@@ -59,7 +102,7 @@ namespace Pseudo3DExtrusion
         private System.Windows.Media.Color _baseColor = System.Windows.Media.Colors.White; [Display(GroupName = "描画設定", Name = "背面カリング", Description = "裏側を向いている面を非表示にします。背面変形を使って面が不自然に消える場合はOFFにしてください。")]
         [ToggleSlider]
         public bool EnableCulling { get => _enableCulling; set => Set(ref _enableCulling, value); }
-        private bool _enableCulling = true; // ★追加：カリング解除スイッチ！
+        private bool _enableCulling = true;
         [Display(GroupName = "描画設定", Name = "簡易ライティング", Description = "光を当てて立体感を強調します。")]
         [ToggleSlider]
         public bool EnableLighting { get => _enableLighting; set => Set(ref _enableLighting, value); }
@@ -138,8 +181,8 @@ namespace Pseudo3DExtrusion
                 _cpuReadBitmap = dc.CreateBitmap(new SizeI(width, height), IntPtr.Zero, 0, new BitmapProperties1(new PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied), 96, 96, BitmapOptions.CpuRead | BitmapOptions.CannotDraw));
             }
 
-            using (var d2dDevice = _devices.DeviceContext.Device)
-            using (var localContext = d2dDevice.CreateDeviceContext(DeviceContextOptions.None))
+            // ★修正点1：d2dDeviceをusingしないように変更し、共有D2Dデバイスの強制破棄を防ぐ
+            using (var localContext = _devices.DeviceContext.Device.CreateDeviceContext(DeviceContextOptions.None))
             using (var gpuBitmap = localContext.CreateBitmap(new SizeI(width, height), new BitmapProperties1(new PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied), 96, 96, BitmapOptions.Target)))
             {
                 localContext.Target = gpuBitmap;
@@ -190,15 +233,18 @@ namespace Pseudo3DExtrusion
                 Vector3 viewDir = worldEye - worldFaceCenter;
                 float dot = Vector3.Dot(rotatedNormal, viewDir);
 
-                // ★修正：カリングがOFFの時は全描画。ONの時は見えてる面だけ。
                 if (!_item.EnableCulling || dot > 0)
                 {
-                    // カリングOFFで裏面が見えている時、法線を反転させてライティングを綺麗にする
                     if (dot < 0) rotatedNormal = -rotatedNormal;
 
                     face.DistanceSq = viewDir.LengthSquared();
                     face.CalculateColorAndBrightness(_item.BaseColor, rotatedNormal, _item.EnableLighting);
                     validFaces.Add(face);
+                }
+                else
+                {
+                    // ★修正点2：カリングされ、描画対象外になった面も即座に解放（メモリリーク防止）
+                    face.Dispose();
                 }
             }
 
@@ -210,7 +256,12 @@ namespace Pseudo3DExtrusion
             float maxX = float.MinValue, maxY = float.MinValue;
             foreach (var face in validFaces) face.CalcBounds(m_internalDraw, ref minX, ref minY, ref maxX, ref maxY);
 
-            if (minX > maxX || minY > maxY || float.IsInfinity(minX)) return desc.DrawDescription;
+            // ★修正点3：早期リターン時にも、蓄積されたvalidFacesをすべてDisposeする（メモリリーク防止）
+            if (minX > maxX || minY > maxY || float.IsInfinity(minX))
+            {
+                foreach (var face in validFaces) face.Dispose();
+                return desc.DrawDescription;
+            }
 
             float limit = 4096f;
             minX = Math.Max(minX, -limit);
@@ -218,7 +269,11 @@ namespace Pseudo3DExtrusion
             minY = Math.Max(minY, -limit);
             maxY = Math.Min(maxY, limit);
 
-            if (minX >= maxX || minY >= maxY) return desc.DrawDescription;
+            if (minX >= maxX || minY >= maxY)
+            {
+                foreach (var face in validFaces) face.Dispose();
+                return desc.DrawDescription;
+            }
 
             int pad = 10;
             int outW = (int)Math.Ceiling(maxX - minX) + pad * 2;
@@ -226,7 +281,11 @@ namespace Pseudo3DExtrusion
             float drawOffsetX = -minX + pad;
             float drawOffsetY = -minY + pad;
 
-            if (outW <= 0 || outH <= 0 || outW > 16384 || outH > 16384) return desc.DrawDescription;
+            if (outW <= 0 || outH <= 0 || outW > 16384 || outH > 16384)
+            {
+                foreach (var face in validFaces) face.Dispose();
+                return desc.DrawDescription;
+            }
 
             using var outBitmap = new SKBitmap(outW, outH, SKColorType.Bgra8888, SKAlphaType.Premul);
             using var canvas = new SKCanvas(outBitmap);
@@ -235,7 +294,7 @@ namespace Pseudo3DExtrusion
 
             using var paint = new SKPaint { IsAntialias = true };
             foreach (var face in validFaces) face.Draw(canvas, m_internalDraw, paint);
-            foreach (var face in validFaces) face.Dispose();
+            foreach (var face in validFaces) face.Dispose(); // 描画後に正常に解放
 
             _outD2DBitmap?.Dispose();
             _outD2DBitmap = dc.CreateBitmap(new SizeI(outW, outH), outBitmap.GetPixels(), outBitmap.RowBytes, new Vortice.Direct2D1.BitmapProperties(new PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Premultiplied)));
@@ -311,88 +370,96 @@ namespace Pseudo3DExtrusion
 
             foreach (var path in paths)
             {
-                var subFrontPaths = new List<List<Vector3>>();
-                var subBackPaths = new List<List<Vector3>>();
-
-                float sumX = 0, sumY = 0;
-                int totalPoints = 0;
-
-                using var iterator = path.CreateIterator(false); SKPathVerb verb; SKPoint[] pts = new SKPoint[4];
-                var subPts = new List<SKPoint>();
-
-                void ProcessSubPath()
+                // ★修正点4：Potraceが生成したSKPathオブジェクトは必ずDisposeを呼ぶ（メモリリーク防止）
+                try
                 {
-                    if (subPts.Count < 3) return;
-                    if (SKPoint.Distance(subPts[0], subPts[^1]) < 0.5f) subPts.RemoveAt(subPts.Count - 1);
+                    var subFrontPaths = new List<List<Vector3>>();
+                    var subBackPaths = new List<List<Vector3>>();
 
-                    var front = new List<Vector3>();
-                    var back = new List<Vector3>();
+                    float sumX = 0, sumY = 0;
+                    int totalPoints = 0;
 
-                    foreach (var p in subPts)
+                    using var iterator = path.CreateIterator(false); SKPathVerb verb; SKPoint[] pts = new SKPoint[4];
+                    var subPts = new List<SKPoint>();
+
+                    void ProcessSubPath()
                     {
-                        Vector3 basePos = new Vector3(p.X + rawLeft, p.Y + rawTop, 0);
-                        front.Add(Vector3.Transform(basePos, frontTransform));
-                        back.Add(Vector3.Transform(basePos, backTransform));
+                        if (subPts.Count < 3) return;
+                        if (SKPoint.Distance(subPts[0], subPts[^1]) < 0.5f) subPts.RemoveAt(subPts.Count - 1);
 
-                        sumX += basePos.X; sumY += basePos.Y; totalPoints++;
-                    }
-                    subFrontPaths.Add(front);
-                    subBackPaths.Add(back);
+                        var front = new List<Vector3>();
+                        var back = new List<Vector3>();
 
-                    if (_item.ShowSide)
-                    {
-                        for (int i = 0; i < subPts.Count; i++)
+                        foreach (var p in subPts)
                         {
-                            var pt1 = subPts[i]; var pt2 = subPts[(i + 1) % subPts.Count];
+                            Vector3 basePos = new Vector3(p.X + rawLeft, p.Y + rawTop, 0);
+                            front.Add(Vector3.Transform(basePos, frontTransform));
+                            back.Add(Vector3.Transform(basePos, backTransform));
 
-                            Vector3 p1Base = new Vector3(pt1.X + rawLeft, pt1.Y + rawTop, 0);
-                            Vector3 p2Base = new Vector3(pt2.X + rawLeft, pt2.Y + rawTop, 0);
-
-                            Vector3 p1f = Vector3.Transform(p1Base, frontTransform);
-                            Vector3 p2f = Vector3.Transform(p2Base, frontTransform);
-                            Vector3 p1b = Vector3.Transform(p1Base, backTransform);
-                            Vector3 p2b = Vector3.Transform(p2Base, backTransform);
-
-                            if (p1f == p2f) continue;
-
-                            Vector3 edge1 = p2f - p1f;
-                            Vector3 edge2 = p1b - p1f;
-                            Vector3 normal = Vector3.Cross(edge2, edge1);
-
-                            if (normal.LengthSquared() < 1e-6f)
-                            {
-                                float dx = p2f.X - p1f.X; float dy = p2f.Y - p1f.Y;
-                                normal = new Vector3(dy, -dx, 0);
-                            }
-                            normal = Vector3.Normalize(normal);
-
-                            faces.Add(new PolygonFace { Vertices = new List<Vector3> { p1f, p2f, p2b, p1b }, Center = (p1f + p2f + p2b + p1b) / 4.0f, Normal = normal });
+                            sumX += basePos.X; sumY += basePos.Y; totalPoints++;
                         }
+                        subFrontPaths.Add(front);
+                        subBackPaths.Add(back);
+
+                        if (_item.ShowSide)
+                        {
+                            for (int i = 0; i < subPts.Count; i++)
+                            {
+                                var pt1 = subPts[i]; var pt2 = subPts[(i + 1) % subPts.Count];
+
+                                Vector3 p1Base = new Vector3(pt1.X + rawLeft, pt1.Y + rawTop, 0);
+                                Vector3 p2Base = new Vector3(pt2.X + rawLeft, pt2.Y + rawTop, 0);
+
+                                Vector3 p1f = Vector3.Transform(p1Base, frontTransform);
+                                Vector3 p2f = Vector3.Transform(p2Base, frontTransform);
+                                Vector3 p1b = Vector3.Transform(p1Base, backTransform);
+                                Vector3 p2b = Vector3.Transform(p2Base, backTransform);
+
+                                if (p1f == p2f) continue;
+
+                                Vector3 edge1 = p2f - p1f;
+                                Vector3 edge2 = p1b - p1f;
+                                Vector3 normal = Vector3.Cross(edge2, edge1);
+
+                                if (normal.LengthSquared() < 1e-6f)
+                                {
+                                    float dx = p2f.X - p1f.X; float dy = p2f.Y - p1f.Y;
+                                    normal = new Vector3(dy, -dx, 0);
+                                }
+                                normal = Vector3.Normalize(normal);
+
+                                faces.Add(new PolygonFace { Vertices = new List<Vector3> { p1f, p2f, p2b, p1b }, Center = (p1f + p2f + p2b + p1b) / 4.0f, Normal = normal });
+                            }
+                        }
+                        subPts.Clear();
                     }
-                    subPts.Clear();
+
+                    while ((verb = iterator.Next(pts)) != SKPathVerb.Done)
+                    {
+                        if (verb == SKPathVerb.Move) { ProcessSubPath(); subPts.Add(pts[0]); }
+                        else if (verb == SKPathVerb.Line) subPts.Add(pts[1]);
+                        else if (verb == SKPathVerb.Close) ProcessSubPath();
+                    }
+                    ProcessSubPath();
+
+                    if (totalPoints > 0)
+                    {
+                        Vector3 baseCenter = new Vector3(sumX / totalPoints, sumY / totalPoints, 0);
+                        Vector3 frontCenter = Vector3.Transform(baseCenter, frontTransform);
+                        Vector3 backCenter = Vector3.Transform(baseCenter, backTransform);
+
+                        Vector3 frontNormal = new Vector3(0, 0, 1);
+                        Vector3 backNormal = Vector3.Normalize(Vector3.TransformNormal(new Vector3(0, 0, -1), backRotationMatrix));
+
+                        if (_item.ShowFront && subFrontPaths.Count > 0)
+                            faces.Add(new ComplexFace { SubPaths = subFrontPaths, Center = frontCenter, Normal = frontNormal, Texture = textureBitmap?.Copy(), TexMatrix = texFront });
+                        if (_item.ShowBack && subBackPaths.Count > 0)
+                            faces.Add(new ComplexFace { SubPaths = subBackPaths, Center = backCenter, Normal = backNormal, Texture = textureBitmap?.Copy(), TexMatrix = texBack });
+                    }
                 }
-
-                while ((verb = iterator.Next(pts)) != SKPathVerb.Done)
+                finally
                 {
-                    if (verb == SKPathVerb.Move) { ProcessSubPath(); subPts.Add(pts[0]); }
-                    else if (verb == SKPathVerb.Line) subPts.Add(pts[1]);
-                    else if (verb == SKPathVerb.Close) ProcessSubPath();
-                }
-                ProcessSubPath();
-
-                if (totalPoints > 0)
-                {
-                    Vector3 baseCenter = new Vector3(sumX / totalPoints, sumY / totalPoints, 0);
-                    Vector3 frontCenter = Vector3.Transform(baseCenter, frontTransform);
-                    Vector3 backCenter = Vector3.Transform(baseCenter, backTransform);
-
-                    Vector3 frontNormal = new Vector3(0, 0, 1);
-                    Vector3 backNormal = Vector3.Normalize(Vector3.TransformNormal(new Vector3(0, 0, -1), backRotationMatrix));
-
-                    if (_item.ShowFront && subFrontPaths.Count > 0)
-                        faces.Add(new ComplexFace { SubPaths = subFrontPaths, Center = frontCenter, Normal = frontNormal, Texture = textureBitmap?.Copy(), TexMatrix = texFront });
-                    if (_item.ShowBack && subBackPaths.Count > 0)
-                        faces.Add(new ComplexFace { SubPaths = subBackPaths, Center = backCenter, Normal = backNormal, Texture = textureBitmap?.Copy(), TexMatrix = texBack });
+                    path.Dispose();
                 }
             }
 
